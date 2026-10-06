@@ -35,23 +35,16 @@ O servidor fica vinculado a 127.0.0.1. Não altere esse endereço para expor inf
 
 - Compra e Aporte adicionam unidades à posição.
 - Venda e Retirada reduzem unidades, usando o método de custo médio.
-- Quantidades vendidas acima do saldo não criam posição vendida: o saldo é limitado a zero. Corrija o histórico quando isso acontecer.
-- Taxas são incorporadas ao custo de aquisição. Em uma venda, o preço de venda não é usado no resultado realizado; a tela apresenta o resultado não realizado com a cotação atual.
+- Vendas acima da posição disponível são recusadas e uma importação em lote inteira é revertida. Confira o histórico e corrija as operações antes de tentar novamente.
+- Taxas de compra integram o custo; taxas de venda reduzem o recebimento. A tela separa resultados realizados, não realizados e proventos.
 
 ## 3. Importar CSV
 
-As colunas obrigatórias são ticker, tipo_operacao, data_transacao, quantidade e preco_unitario. As demais são opcionais:
+Obrigatórios: ticker, tipo_operacao, data_transacao, quantidade e preco_unitario. Colunas opcionais: nome_ativo, classe_ativo, categoria_fundo_setor, taxas_custos, codigo_api, moeda_ativo, moeda_cotacao, moeda_transacao e taxa_cambio.
 
-- nome_ativo
-- classe_ativo
-- categoria_fundo_setor
-- taxas_custos
-- codigo_api
-- moeda (BRL ou USD, padrão BRL)
+Preço e custos estão na moeda_transacao. A moeda_ativo descreve a denominação/listagem; moeda_cotacao descreve a série do provedor. Em arquivos, a coluna antiga moeda identifica a moeda do ativo, enquanto moeda_transacao ausente assume BRL. Declare a moeda da operação corretamente e informe taxa de câmbio em BRL por unidade; USD, USDT e outras moedas exigem taxas próprias.
 
-Use as classes Ação, FII, ETF, Cripto, Renda Fixa ou Outro. Use Compra/Venda/Aporte/Retirada ou buy/sell. Datas ISO (AAAA-MM-DD) ou dia/mês/ano são aceitas. Vírgula decimal também é aceita. Cripto via CoinGecko sempre usa preços em BRL.
-
-O modelo fica em examples/exemplo_transacoes.csv e pode ser baixado pela interface.
+Use classes Ação, FII, ETF, Cripto, Renda Fixa ou Outro. Operações: Compra/Venda/Aporte/Retirada. Datas ISO ou DD/MM/AAAA e decimal com vírgula são aceitos. Duplicatas no arquivo são marcadas; arquivo todo é gravado atomicamente.
 
 ## 4. Importar OFX
 
@@ -61,9 +54,9 @@ O importador aceita blocos de compra e venda de investimento que contenham ident
 
 Na tela Estado atual, use Atualizar cotações para forçar uma nova consulta. Fontes e comportamento:
 
-- yfinance: ações, FIIs e ETFs. Tickers brasileiros são enviados com sufixo .SA automaticamente. Para símbolos estrangeiros, escolha USD como moeda antes da conversão e informe o símbolo Yahoo (por exemplo, AAPL); o histórico USD/BRL é usado para exibir valores em reais. Tickers internacionais listados em bolsa brasileira podem usar BRL e o sufixo .SA.
+- yfinance: ações, FIIs e ETFs. Tickers brasileiros são enviados com sufixo .SA automaticamente. Para símbolos estrangeiros, informe USD como moeda de cotação e o símbolo Yahoo (por exemplo, AAPL); o histórico USD/BRL é usado para exibir valores em reais. Tickers internacionais listados em bolsa brasileira podem usar BRL e o sufixo .SA.
 - CoinGecko: BTC, ETH, SOL, ADA, XRP e DOGE têm IDs padrão. Para outra moeda, informe o ID CoinGecko (por exemplo, bitcoin, ethereum). Os preços recebidos são convertidos para BRL pelo serviço.
-- Cotações ficam salvas no SQLite. Se a API falhar, o sistema mantém a última cotação e permite digitação manual.
+- Cotações ficam salvas no SQLite com data, origem, moeda original e taxa aplicada quando disponíveis. Se a API falhar, o sistema mantém a última cotação e permite digitação manual com taxa explícita ou cache.
 - A série retornada pelo yfinance usa preço ajustado quando disponível; a métrica de retorno incorpora proventos ajustados na série de preço. Os valores de dividendos e splits são registrados separadamente quando o provedor os informa.
 - As chamadas dependem da disponibilidade e dos termos dos provedores. Não são preços garantidos em tempo real.
 
@@ -74,7 +67,7 @@ Na tela Estado atual, use Atualizar cotações para forçar uma nova consulta. F
 - O beta e o CAPM são exibidos na simulação de um ativo se o histórico do benchmark estiver disponível.
 - Ativos sem histórico suficiente podem mostrar “—”.
 - Uma posição sem cotação usa o preço médio como valor provisório; confira a origem da cotação na tabela.
-- O gráfico histórico do portfólio reaplica os pesos atuais às séries disponíveis. Ele não reconstrói os aportes, vendas e pesos que existiam em cada data passada.
+- O gráfico histórico é uma estimativa que reaplica pesos atuais às séries disponíveis; não é rentabilidade histórica reconstruída.
 
 ## 7. Criar projeções
 
@@ -111,8 +104,8 @@ A taxa livre de risco não é atualizada automaticamente. Use uma fonte oficial 
 ## 10. Backup e restauração
 
 - O sistema cria uma cópia do banco antes da inicialização e conserva as 14 cópias mais recentes em data/backups.
-- Baixe também uma cópia pelo botão Baixar banco SQLite e guarde-a em local seguro, separado do computador.
-- Para restaurar, selecione um arquivo de backup e use Validar e restaurar backup. O sistema verifica a integridade SQLite e as tabelas antes da substituição.
+- Baixe também uma cópia pelo botão Baixar backup SQLite e guarde-a em local seguro, separado do computador.
+- Para restaurar, selecione um arquivo de backup e use Validar e restaurar. O sistema verifica integridade SQLite, tabelas, versão do schema e chaves estrangeiras antes da substituição.
 - Não edite investimentos.db enquanto a plataforma estiver aberta. Encerre o aplicativo antes de copiar arquivos diretamente.
 
 ## 11. Onde os dados ficam
@@ -128,7 +121,8 @@ Esses arquivos permanecem na pasta do projeto. Ao mover a plataforma, copie os a
 - Cotação não encontrada: confirme o ticker, use um código do provedor ou registre preço manual.
 - Erro CoinGecko/rate limit: aguarde, tente mais tarde, configure a variável opcional COINGECKO_DEMO_API_KEY ou use cotação manual.
 - Gráfico vazio: confira se há pelo menos duas observações de preço para calcular variação.
-- O portfólio parece divergente: revise vendas, desdobramentos, ticker, moeda da cotação e quantidade por ativo.
+- Após migrar uma base antiga, resultados estão bloqueados: abra Cadastro e importação / Câmbio legado. Informe uma taxa histórica confiável para cada operação estrangeira pendente. A operação é preservada em moeda original e não entra nos resultados até a regularização.
+- O portfólio parece divergente: revise vendas, desdobramentos, ticker, moeda da transação/cotação e quantidade por ativo.
 - Porta ocupada: encerre outra instância local do Streamlit antes de abrir de novo.
 
 ## 13. Encerrar e proteger os dados
@@ -141,3 +135,6 @@ Feche o terminal que iniciou o app. Guarde backups fora da pasta quando desejar 
 - yfinance, histórico de preços: https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.history.html
 - CoinGecko, gráfico histórico por ID: https://docs.coingecko.com/reference/coins-id-market-chart
 - Banco Central do Brasil, série diária da taxa Selic efetiva (SGS 11): https://dadosabertos.bcb.gov.br/pt_BR/dataset/11-taxa-de-juros---selic
+
+
+Operações estrangeiras exigem moeda e câmbio para BRL; pode-se usar cache de até sete dias ou entrada manual. USD e USDT não são equivalentes. Renda fixa e valor atualizado são manuais. Migração existente cria backup sem apagar banco.

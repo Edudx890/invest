@@ -10,89 +10,75 @@ SELL_OPERATIONS = {"Venda", "Retirada"}
 TRADING_DAYS = 252
 
 
-def build_positions(
-    assets: list[dict],
-    transactions: list[dict],
-    quote_by_asset: dict[int, dict],
-    corporate_actions: list[dict] | None = None,
-) -> pd.DataFrame:
-    """Apply a moving-average cost method to the transaction ledger."""
-    grouped: dict[int, dict] = {}
-    for asset in assets:
-        asset_id = int(asset["id_ativo"])
-        grouped[asset_id] = {
-            "id_ativo": asset_id,
-            "ticker": asset["ticker"],
-            "nome_ativo": asset["nome_ativo"],
-            "classe_ativo": asset["classe_ativo"],
-            "categoria_fundo_setor": asset.get("categoria_fundo_setor") or "Sem categoria",
-            "quantidade": 0.0,
-            "custo_total": 0.0,
-            "ultimo_preco": 0.0,
-            "fonte_cotacao": "Sem cotação",
-            "data_cotacao": "",
-        }
-    events = []
-    for txn in transactions:
-        events.append((str(txn["data_transacao"]), 1, txn))
-    for action in corporate_actions or []:
-        if str(action.get("tipo_provento", "")).title() == "Split":
-            events.append((str(action["data_com"]), 0, action))
-    for _, _, event in sorted(events, key=lambda item: (item[0], item[1])):
-        asset_id = int(event["id_ativo"])
-        if asset_id not in grouped:
+def build_positions(assets,transactions,quote_by_asset,corporate_actions=None):
+    from decimal import Decimal
+    from .financial import decimal_from_row,decimal_value
+    groups={}
+    for a in assets:
+        aid=int(a["id_ativo"]); groups[aid]={"id_ativo":aid,"ticker":a["ticker"],"nome_ativo":a["nome_ativo"],"classe_ativo":a["classe_ativo"],"categoria_fundo_setor":a.get("categoria_fundo_setor") or "Sem categoria","moeda_ativo":a.get("moeda_ativo") or a.get("moeda") or "BRL","moeda_base":"BRL","q":Decimal(0),"_price_d":Decimal(0),"cost":Decimal(0),"realized":Decimal(0),"income":Decimal(0),"invested":Decimal(0),"fees":Decimal(0),"activity":False,"ultimo_preco":0.0,"fonte_cotacao":"Sem cotação","data_cotacao":""}
+    events=[(str(t["data_transacao"]),1,int(t.get("id_transacao",0)),t) for t in transactions]
+    for x in corporate_actions or []:
+        if str(x.get("tipo_provento","")).title()=="Split": events.append((str(x["data_com"]),0,int(x.get("id_provento",0)),x))
+    for _,kind,_,e in sorted(events,key=lambda x:x[:3]):
+        aid=int(e["id_ativo"])
+        if aid not in groups: continue
+        r=groups[aid]; r["activity"]=True
+        if kind==0:
+            factor=decimal_value(e.get("valor_por_acao"))
+            if factor>0: r["q"]*=factor
             continue
-        current = grouped[asset_id]
-        if "tipo_provento" in event:
-            factor = float(event["valor_por_acao"])
-            if factor > 0:
-                current["quantidade"] *= factor
-            continue
-        quantity = float(event["quantidade"])
-        unit_price = float(event["preco_unitario"])
-        fees = float(event.get("taxas_custos") or 0.0)
-        operation = event["tipo_operacao"].title()
-        if operation in BUY_OPERATIONS:
-            current["quantidade"] += quantity
-            current["custo_total"] += quantity * unit_price + fees
-        elif operation in SELL_OPERATIONS:
-            if current["quantidade"] > 0:
-                average_cost = current["custo_total"] / current["quantidade"]
-                removed = min(quantity, current["quantidade"])
-                current["quantidade"] -= removed
-                current["custo_total"] -= removed * average_cost
-    for asset_id, quote in quote_by_asset.items():
-        if asset_id in grouped:
-            grouped[asset_id]["ultimo_preco"] = float(quote["preco_fechamento"])
-            grouped[asset_id]["fonte_cotacao"] = str(quote["fonte_dados"])
-            grouped[asset_id]["data_cotacao"] = str(quote["data_cotacao"])
-    records = []
-    for row in grouped.values():
-        if row["quantidade"] <= 1e-12:
-            continue
-        price = row["ultimo_preco"]
-        if price <= 0:
-            price = row["custo_total"] / row["quantidade"] if row["quantidade"] else 0.0
-            row["fonte_cotacao"] = "Preço médio de aquisição"
-        row["preco_medio"] = row["custo_total"] / row["quantidade"] if row["quantidade"] else 0.0
-        row["ultimo_preco"] = price
-        row["valor_mercado"] = row["quantidade"] * price
-        row["resultado_nao_realizado"] = row["valor_mercado"] - row["custo_total"]
-        records.append(row)
-    columns = [
-        "id_ativo", "ticker", "nome_ativo", "classe_ativo", "categoria_fundo_setor",
-        "quantidade", "preco_medio", "ultimo_preco", "valor_mercado", "custo_total",
-        "resultado_nao_realizado", "fonte_cotacao", "data_cotacao",
-    ]
-    frame = pd.DataFrame(records, columns=columns)
+        q=decimal_value(e.get("quantidade_original",e["quantidade"])); op=str(e["tipo_operacao"]).title()
+        currency=str(e.get("moeda_transacao") or "BRL").upper()
+        if currency!="BRL" and e.get("valor_total_brl") in (None,"") and e.get("taxa_cambio") in (None,""):
+            raise ValueError(f"Câmbio histórico pendente para {r['ticker']} em {e['data_transacao']} ({currency}); informe a taxa antes de consultar resultados.")
+        fx=decimal_value(e.get("taxa_cambio"),Decimal(1))
+        total=decimal_from_row(e,"valor_total_brl","valor_total_original")
+        if e.get("valor_total_brl") in (None,""): total=q*decimal_from_row(e,"preco_unitario_original","preco_unitario")*fx
+        if e.get("taxas_custos_brl") not in (None,""):
+            fee=decimal_from_row(e,"taxas_custos_brl","taxas_custos_original")
+        else:
+            fee=decimal_from_row(e,"taxas_custos_original","taxas_custos")
+            fee*=fx
+        r["fees"]+=fee
+        if op in BUY_OPERATIONS: r["q"]+=q; r["cost"]+=total+fee; r["invested"]+=total+fee
+        elif op in SELL_OPERATIONS:
+            if q>r["q"]: raise ValueError(f"Venda/retirada excede posição de {r['ticker']}.")
+            basis=r["cost"]/r["q"]*q if r["q"] else Decimal(0)
+            if op=="Venda": r["realized"]+=total-fee-basis
+            r["q"]-=q; r["cost"]-=basis
+    for e in corporate_actions or []:
+        if str(e.get("tipo_provento","")).title()!="Split" and int(e["id_ativo"]) in groups:
+            r=groups[int(e["id_ativo"])]; r["income"]+=decimal_from_row(e,"valor_total_brl","valor_total"); r["activity"]=True
+    for aid,q in quote_by_asset.items():
+        if aid in groups:
+            groups[aid]["_price_d"]=decimal_value(q.get("preco_fechamento_decimal",q["preco_fechamento"])); groups[aid]["ultimo_preco"]=float(groups[aid]["_price_d"]); groups[aid]["fonte_cotacao"]=str(q.get("fonte_dados","Sem origem")); groups[aid]["data_cotacao"]=str(q.get("data_cotacao",""))
+    rows=[]
+    for r in groups.values():
+        q,cost,realized,income,invested,fees=(r.pop(k) for k in ("q","cost","realized","income","invested","fees")); mark=r.pop("_price_d")
+        if not r.pop("activity") and q==0: continue
+        price=mark if mark>0 else cost/q if q else Decimal(0)
+        if r["ultimo_preco"]<=0 and q: r["fonte_cotacao"]="Estimado pelo custo médio"
+        market=q*price; unrl=market-cost; total=realized+unrl+income
+        r.update({"quantidade":float(q),"preco_medio":float(cost/q) if q else 0.0,"ultimo_preco":float(price),"valor_mercado":float(market),"custo_total":float(cost),"base_investida":float(invested),"resultado_realizado":float(realized),"resultado_nao_realizado":float(unrl),"proventos_total":float(income),"resultado_total":float(total),"rentabilidade_pct":float(total/invested) if invested else None,"taxas_total":float(fees)})
+        rows.append(r)
+    cols=["id_ativo","ticker","nome_ativo","classe_ativo","categoria_fundo_setor","moeda_ativo","moeda_base","quantidade","preco_medio","ultimo_preco","valor_mercado","custo_total","base_investida","resultado_realizado","resultado_nao_realizado","proventos_total","resultado_total","rentabilidade_pct","taxas_total","fonte_cotacao","data_cotacao"]
+    frame=pd.DataFrame(rows,columns=cols)
     if not frame.empty:
-        total = frame["valor_mercado"].sum()
-        frame["peso_pct"] = frame["valor_mercado"] / total * 100 if total else 0.0
-    else:
-        frame["peso_pct"] = pd.Series(dtype=float)
+        total=frame["valor_mercado"].sum(); frame["peso_pct"]=frame["valor_mercado"]/total*100 if total else 0.0
+    else: frame["peso_pct"]=pd.Series(dtype=float)
     return frame
 
-
+def fixed_income_positions(records):
+    from .financial import decimal_value
+    rows=[]
+    for x in records:
+        invested_d=decimal_value(x["valor_investido"]); current_d=decimal_value(x["valor_atualizado"]); result_d=current_d-invested_d
+        invested=float(invested_d); current=float(current_d); result=float(result_d)
+        rows.append({"id_ativo":-int(x["id_renda_fixa"]),"ticker":f"RF-{x['id_renda_fixa']}","nome_ativo":x["nome"],"classe_ativo":"Renda Fixa","categoria_fundo_setor":x.get("indexador") or x.get("tipo") or "Manual","moeda_ativo":"BRL","moeda_base":"BRL","quantidade":1.0,"preco_medio":invested,"ultimo_preco":current,"valor_mercado":current,"custo_total":invested,"base_investida":invested,"resultado_realizado":0.0,"resultado_nao_realizado":result,"proventos_total":0.0,"resultado_total":result,"rentabilidade_pct":float(result_d/invested_d) if invested_d else None,"taxas_total":0.0,"fonte_cotacao":"Manual","data_cotacao":str(x.get("atualizado_em","")),"peso_pct":0.0})
+    frame=pd.DataFrame(rows)
+    if not frame.empty:
+        total=frame["valor_mercado"].sum(); frame["peso_pct"]=frame["valor_mercado"]/total*100 if total else 0.0
+    return frame
 def historical_prices(quote_rows: list[dict]) -> pd.DataFrame:
     if not quote_rows:
         return pd.DataFrame()

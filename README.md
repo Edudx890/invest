@@ -14,7 +14,7 @@ Também é possível instalar e executar em macOS ou Linux com setup_unix.sh e r
 
 ## O que está incluído
 
-- Estado atual: posições, preço médio, valor estimado, resultado não realizado, alocação, proventos e indicadores de risco.
+- Estado atual: posições, custo médio, resultados realizados/não realizados, proventos, alocação, proventos e indicadores de risco.
 - Previsão: cenários determinísticos e faixa de incerteza simulada em até 600 meses.
 - Simulação: análise histórica e de impacto hipotético de um ativo externo.
 - Dados: SQLite, importação CSV e OFX compatível, entrada manual, cotações de mercado e cópias locais de segurança.
@@ -34,6 +34,8 @@ Consulte:
 - docs/MAPA_DE_DESENVOLVIMENTO.md
 - docs/METODOS_E_MODELO_DE_DADOS.md
 - docs/DECISOES_E_LIMITACOES.md
+- docs/METODOLOGIA_FINANCEIRA.md e docs/TESTES.md
+- CHANGELOG.md
 
 ## Tecnologias
 
@@ -44,3 +46,7 @@ Ativos Yahoo podem usar BRL ou USD. Séries em USD são convertidas para BRL pel
 ## Aviso
 
 Esta aplicação é uma ferramenta de registro e análise, não executa ordens, não substitui uma corretora, não fornece recomendação financeira e não garante resultados. Rentabilidade passada não representa garantia de rendimentos futuros.
+
+## Integridade financeira
+
+BRL é a moeda-base. Transações guardam valores decimais originais, moeda, taxa, origem do câmbio e valores convertidos; quantidades e preços também preservam representação decimal canônica. USD/USDT são taxas distintas. Migração preserva banco existente; operações estrangeiras antigas sem câmbio histórico ficam bloqueadas até regularização manual. Renda fixa é manual; histórico com pesos atuais é estimativa. Consulte docs/METODOLOGIA_FINANCEIRA.md e docs/TESTES.md. Testes: .venv\\Scripts\\python.exe -m pytest.

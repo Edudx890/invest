@@ -1,4 +1,4 @@
-ticker,nome_ativo,classe_ativo,categoria_fundo_setor,tipo_operacao,data_transacao,quantidade,preco_unitario,taxas_custos,codigo_api,moeda
-PETR4,Petrobras PN,Ação,Energia,Compra,2025-01-10,10,35.50,1.00,,BRL
-HGLG11,CSHG Logística,FII,Tijolo,Compra,2025-02-05,2,158.00,0.00,,BRL
-BTC,Bitcoin,Cripto,Cripto,Compra,2025-03-01,0.001,420000.00,0.00,bitcoin,BRL
+ticker,nome_ativo,classe_ativo,categoria_fundo_setor,tipo_operacao,data_transacao,quantidade,preco_unitario,taxas_custos,codigo_api,moeda_ativo,moeda_cotacao,moeda_transacao,taxa_cambio
+PETR4,Petrobras PN,Ação,Energia,Compra,2025-01-10,10,35.50,1.00,,BRL,BRL,BRL,1
+AAPL,Apple,ETF,Exterior,Compra,2025-02-05,2,200,1,AAPL,USD,USD,USD,5.80
+BTC,Bitcoin,Cripto,Cripto,Compra,2025-03-01,0.001,85000,0,bitcoin,BTC,BRL,USDT,5.75

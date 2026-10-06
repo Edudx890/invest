@@ -61,3 +61,8 @@ Se o CoinGecko pedir uma chave Demo, defina a variável de ambiente COINGECKO_DE
 - Histórico yfinance: https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.history.html
 - CoinGecko market chart: https://docs.coingecko.com/reference/coins-id-market-chart
 - Banco Central, série diária da Selic: https://dadosabertos.bcb.gov.br/pt_BR/dataset/11-taxa-de-juros---selic
+
+
+## Versão 1.2.0
+
+BRL é a moeda-base. Custo médio e cálculos do ledger usam Decimal; valores originais e convertidos, moeda, taxa e origem ficam separados. USD e USDT usam taxas independentes. Operações antigas estrangeiras sem taxa histórica são preservadas como pendentes e bloqueiam resultados até regularização manual. Renda fixa é manual; histórico ponderado pelos pesos atuais é estimativa; TWR/XIRR e tributação não estão implementados. Schema 3 tem migração aditiva e backup; a restauração valida integridade, versão e chaves estrangeiras.

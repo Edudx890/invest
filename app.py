@@ -22,6 +22,7 @@ from portfolio_app.calculations import (
     capm_expected_return,
     concentration_alerts,
     dividend_yield_12m,
+    fixed_income_positions,
     project_scenarios,
     risk_metrics,
     weighted_returns,
@@ -83,6 +84,11 @@ def load_portfolio() -> tuple[pd.DataFrame, list[dict], list[dict], pd.DataFrame
     corporate_actions = records(db.list_dividends())
     latest = {int(asset_id): dict(row) for asset_id, row in db.latest_quotes().items()}
     position_frame = build_positions(assets, transactions, latest, corporate_actions)
+    fixed_rows = records(db.list_fixed_income())
+    if fixed_rows:
+        position_frame = pd.concat([position_frame, fixed_income_positions(fixed_rows)], ignore_index=True)
+        total_value = position_frame['valor_mercado'].sum()
+        position_frame['peso_pct'] = position_frame['valor_mercado'] / total_value * 100 if total_value else 0.0
     price_frame = pd.DataFrame()
     if quotes:
         price_frame = pd.DataFrame(quotes)
@@ -115,10 +121,15 @@ def notify_refresh(assets: list[dict]) -> tuple[int, list[str]]:
                 db.upsert_quote(
                     int(asset["id_ativo"]),
                     str(quote["data"]),
-                    float(quote["preco"]),
-                    str(quote["fonte"]),
-                    manual=False,
+                    float(quote.get("preco_original", quote["preco"])),
+                    str(quote["fonte"]), manual=False,
+                    original_currency=str(quote.get("moeda_original", "BRL")),
+                    exchange_rate=quote.get("taxa_cambio", 1),
+                    adjusted_price=quote.get("preco_ajustado_original", quote.get("preco_original", quote["preco"])),
                 )
+                currency = str(quote.get("moeda_original", "BRL"))
+                if currency != "BRL" and quote.get("taxa_cambio"):
+                    db.upsert_exchange_rate(currency, str(quote["data"]), quote["taxa_cambio"], str(quote["fonte"]))
                 split_factor = float(quote.get("split") or 0.0)
                 if split_factor > 0:
                     db.add_dividend(
@@ -166,7 +177,7 @@ def current_analysis(position_frame: pd.DataFrame, quote_frame: pd.DataFrame, co
                 "id_ativo": quote_frame["id_ativo"],
                 "ticker": quote_frame["ticker"],
                 "data_cotacao": quote_frame["data_cotacao"],
-                "preco_fechamento": quote_frame["preco_fechamento"],
+                "preco_fechamento": quote_frame.get("preco_ajustado", quote_frame["preco_fechamento"]),
             }
         )
     pivot = pd.DataFrame()
@@ -206,31 +217,29 @@ def render_sidebar() -> str:
     return choice
 
 
-def render_metrics(position_frame: pd.DataFrame, metrics: dict, dividends: list[dict], config: dict[str, str]):
-    value = float(position_frame["valor_mercado"].sum()) if not position_frame.empty else 0.0
-    cost = float(position_frame["custo_total"].sum()) if not position_frame.empty else 0.0
-    pnl = value - cost
-    pnl_pct = pnl / cost if cost else None
-    risk = metrics["volatilidade_ewma"]
-    sharpe = metrics["sharpe"]
-    cols = st.columns(5)
-    cols[0].metric("Patrimônio estimado", fmt_brl(value))
-    cols[1].metric("Resultado não realizado", fmt_brl(pnl), fmt_pct(pnl_pct))
-    cols[2].metric("Retorno anualizado¹", fmt_pct(metrics["retorno_anualizado"]))
-    cols[3].metric("Volatilidade EWMA anual", fmt_pct(risk))
-    cols[4].metric("Sharpe anualizado", "—" if sharpe is None else f"{sharpe:.2f}")
-    if not config["risk_free_annual"].strip():
-        st.info("Informe a taxa Selic/CDI anual nas configurações para contextualizar o índice de Sharpe.")
-    if position_frame.empty:
-        return
-    current_yields = []
+def render_metrics(position_frame,metrics,dividends,config):
+    value=float(position_frame["valor_mercado"].sum()) if not position_frame.empty else 0.0
+    cost=float(position_frame["custo_total"].sum()) if not position_frame.empty else 0.0
+    realized=float(position_frame["resultado_realizado"].sum()) if not position_frame.empty else 0.0
+    unrealized=float(position_frame["resultado_nao_realizado"].sum()) if not position_frame.empty else 0.0
+    income=float(position_frame["proventos_total"].sum()) if not position_frame.empty else 0.0
+    invested=float(position_frame["base_investida"].sum()) if not position_frame.empty else 0.0
+    total=realized+unrealized+income; cols=st.columns(6)
+    cols[0].metric("Patrimônio estimado (BRL)",fmt_brl(value)); cols[1].metric("Custo residual (BRL)",fmt_brl(cost))
+    cols[2].metric("Resultado realizado (BRL)",fmt_brl(realized)); cols[3].metric("Resultado não realizado (BRL)",fmt_brl(unrealized))
+    cols[4].metric("Proventos registrados (BRL)",fmt_brl(income)); cols[5].metric("Resultado total (BRL)",fmt_brl(total),fmt_pct(total/invested if invested else None))
+    cols=st.columns(3); cols[0].metric("Retorno anualizado estimado",fmt_pct(metrics["retorno_anualizado"]))
+    cols[1].metric("Volatilidade EWMA anual",fmt_pct(metrics["volatilidade_ewma"]))
+    cols[2].metric("Sharpe anualizado","" if metrics["sharpe"] is None else f"{metrics['sharpe']:.2f}")
+    if not config["risk_free_annual"].strip(): st.info("Informe a taxa Selic/CDI anual nas configurações para contextualizar o índice de Sharpe.")
+    if not position_frame.empty: st.caption("Valores consolidados em BRL. Resultado total não é TWR/XIRR nem apuração fiscal.")
+    if position_frame.empty: return
+    yields=[]
     for row in position_frame.to_dict("records"):
-        ratio = dividend_yield_12m(dividends, int(row["id_ativo"]), float(row["valor_mercado"]))
-        if ratio is not None:
-            current_yields.append((float(row["peso_pct"]) / 100.0) * ratio)
-    if current_yields:
-        st.caption(f"Dividend yield ponderado de proventos registrados em 12 meses: {fmt_pct(sum(current_yields))}.")
-    st.caption("¹ Estimativa anualizada com os preços disponíveis e a composição atual da carteira.")
+        ratio=dividend_yield_12m(dividends,int(row["id_ativo"]),float(row["valor_mercado"])) if row["id_ativo"]>0 else None
+        if ratio is not None: yields.append((float(row["peso_pct"])/100)*ratio)
+    if yields: st.caption(f"Dividend yield ponderado registrado em 12 meses: {fmt_pct(sum(yields))}.")
+
 
 
 def render_overview(position_frame, assets, quote_frame, dividends, config):
@@ -248,11 +257,11 @@ def render_overview(position_frame, assets, quote_frame, dividends, config):
     with left:
         by_class = position_frame.groupby("classe_ativo", as_index=False)["valor_mercado"].sum()
         fig = px.pie(by_class, names="classe_ativo", values="valor_mercado", hole=0.48, title="Alocação por classe")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     with right:
         by_category = position_frame.groupby("categoria_fundo_setor", as_index=False)["valor_mercado"].sum()
         fig = px.pie(by_category, names="categoria_fundo_setor", values="valor_mercado", hole=0.48, title="Alocação por setor/tipo")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     if len(portfolio_series) > 1:
         start_value = float(position_frame["valor_mercado"].sum())
         history = (1.0 + portfolio_series).cumprod() * start_value
@@ -260,9 +269,9 @@ def render_overview(position_frame, assets, quote_frame, dividends, config):
             x=pd.to_datetime(history.index),
             y=history.values,
             labels={"x": "Data", "y": "Índice do patrimônio (R$)"},
-            title="Evolução indicativa com os pesos atuais",
+            title="Estimativa histórica reponderada pelos pesos atuais",
         )
-        st.plotly_chart(chart, use_container_width=True)
+        st.plotly_chart(chart, width="stretch")
         st.caption("Histórico reponderado pela composição atual; não reconstrói aportes e vendas passados.")
     manual_count = sum(int(row.get("is_manual_entry") or 0) for row in assets)
     st.caption(f"Ativos cadastrados: {len(assets)} · ativos com origem manual: {manual_count}")
@@ -273,7 +282,7 @@ def render_current_state(position_frame, assets, quote_frame, dividends, config)
     st.write("Posições derivadas do histórico de compras, vendas e ajustes cadastrados.")
     refresh_col, help_col = st.columns([1, 3])
     with refresh_col:
-        refresh_clicked = st.button("Atualizar cotações", type="primary", use_container_width=True)
+        refresh_clicked = st.button("Atualizar cotações", type="primary", width="stretch")
     if refresh_clicked:
         cached_market_history.clear()
         updated, failures = notify_refresh(assets)
@@ -300,14 +309,14 @@ def render_current_state(position_frame, assets, quote_frame, dividends, config)
     st.subheader("Posições")
     display = position_frame[
         [
-            "ticker", "nome_ativo", "classe_ativo", "quantidade", "preco_medio",
-            "ultimo_preco", "valor_mercado", "peso_pct", "resultado_nao_realizado",
-            "fonte_cotacao", "data_cotacao",
+            "ticker", "nome_ativo", "classe_ativo", "moeda_ativo", "moeda_base", "quantidade", "preco_medio",
+            "ultimo_preco", "valor_mercado", "peso_pct", "custo_total", "resultado_realizado",
+            "resultado_nao_realizado", "proventos_total", "fonte_cotacao", "data_cotacao",
         ]
     ].copy()
     st.dataframe(
         display,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "quantidade": st.column_config.NumberColumn("Quantidade", format="%.6f"),
@@ -315,24 +324,27 @@ def render_current_state(position_frame, assets, quote_frame, dividends, config)
             "ultimo_preco": st.column_config.NumberColumn("Último preço", format="R$ %.2f"),
             "valor_mercado": st.column_config.NumberColumn("Valor de mercado", format="R$ %.2f"),
             "peso_pct": st.column_config.NumberColumn("Peso", format="%.2f%%"),
-            "resultado_nao_realizado": st.column_config.NumberColumn("Resultado", format="R$ %.2f"),
+            "custo_total": st.column_config.NumberColumn("Custo residual (BRL)",format="R$ %.2f"),
+            "resultado_realizado": st.column_config.NumberColumn("Realizado (BRL)",format="R$ %.2f"),
+            "resultado_nao_realizado": st.column_config.NumberColumn("Não realizado (BRL)",format="R$ %.2f"),
+            "proventos_total": st.column_config.NumberColumn("Proventos (BRL)",format="R$ %.2f"),
         },
     )
     left, right = st.columns(2)
     with left:
         allocation = position_frame.groupby("classe_ativo", as_index=False)["valor_mercado"].sum()
-        st.plotly_chart(px.pie(allocation, names="classe_ativo", values="valor_mercado", hole=0.4, title="Distribuição por classe"), use_container_width=True)
+        st.plotly_chart(px.pie(allocation, names="classe_ativo", values="valor_mercado", hole=0.4, title="Distribuição por classe"), width="stretch")
     with right:
         allocation = position_frame.groupby("categoria_fundo_setor", as_index=False)["valor_mercado"].sum()
-        st.plotly_chart(px.bar(allocation, x="categoria_fundo_setor", y="valor_mercado", title="Exposição por setor/tipo"), use_container_width=True)
+        st.plotly_chart(px.bar(allocation, x="categoria_fundo_setor", y="valor_mercado", title="Exposição por setor/tipo"), width="stretch")
     for alert in concentration_alerts(position_frame, float(config["concentration_limit_pct"])):
         st.warning("Concentração: " + alert)
     if len(portfolio_series) > 1:
         value = float(position_frame["valor_mercado"].sum())
         series = (1.0 + portfolio_series).cumprod() * value
         st.plotly_chart(
-            px.line(x=pd.to_datetime(series.index), y=series.values, labels={"x": "Data", "y": "R$"}, title="Evolução indicativa do patrimônio"),
-            use_container_width=True,
+            px.line(x=pd.to_datetime(series.index), y=series.values, labels={"x": "Data", "y": "R$"}, title="Estimativa histórica reponderada pelos pesos atuais"),
+            width="stretch",
         )
         st.caption("Série indicativa calculada com pesos atuais e cotações registradas; eventos de fluxo de caixa anteriores não são reconstruídos.")
     if dividends:
@@ -340,7 +352,7 @@ def render_current_state(position_frame, assets, quote_frame, dividends, config)
         dividend_frame = pd.DataFrame(dividends)
         st.dataframe(
             dividend_frame[["ticker", "tipo_provento", "data_com", "data_pagamento", "valor_por_acao", "valor_total", "is_manual_entry"]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "valor_por_acao": st.column_config.NumberColumn("Valor por unidade", format="R$ %.4f"),
@@ -398,9 +410,9 @@ def render_forecast(position_frame, quote_frame, config):
         for column in path.columns[1:]:
             figure.add_trace(go.Scatter(x=path["Mês"], y=path[column], mode="lines", name=column))
         figure.update_layout(title="Patrimônio projetado", xaxis_title="Mês", yaxis_title="Patrimônio (R$)", hovermode="x unified")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, width="stretch")
         st.subheader("Valores ao longo do tempo")
-        st.dataframe(path.merge(band, on="Mês"), use_container_width=True, hide_index=True, column_config={
+        st.dataframe(path.merge(band, on="Mês"), width="stretch", hide_index=True, column_config={
             column: st.column_config.NumberColumn(column, format="R$ %.2f")
             for column in path.columns[1:]
         })
@@ -551,181 +563,149 @@ def render_asset_simulation(position_frame, quote_frame, config):
         ]
     )
     chart_data = compare.melt(id_vars="Indicador", var_name="Carteira", value_name="Valor")
-    st.plotly_chart(px.bar(chart_data, x="Indicador", y="Valor", color="Carteira", barmode="group", title="Métricas históricas indicativas"), use_container_width=True)
+    st.plotly_chart(px.bar(chart_data, x="Indicador", y="Valor", color="Carteira", barmode="group", title="Métricas históricas indicativas"), width="stretch")
     class_mix = position_frame.groupby("classe_ativo")["valor_mercado"].sum().to_dict()
     class_mix[asset_class] = class_mix.get(asset_class, 0.0) + float(amount)
     mix_frame = pd.DataFrame([{"Classe": key, "Valor": value} for key, value in class_mix.items()])
-    st.plotly_chart(px.pie(mix_frame, names="Classe", values="Valor", hole=0.4, title="Alocação hipotética por classe"), use_container_width=True)
+    st.plotly_chart(px.pie(mix_frame, names="Classe", values="Valor", hole=0.4, title="Alocação hipotética por classe"), width="stretch")
     st.caption(f"{ticker}: fonte {source_label} · preço de referência {fmt_brl(manual_price)} · retorno anual estimado {fmt_pct(external_annual_return)} · volatilidade anual {fmt_pct(external_vol)} · dividend yield informado {manual_dy:.2f}%.")
     st.caption("A carteira combinada usa a série disponível e pesos proporcionais ao valor atual e ao aporte hipotético. Dados incompletos reduzem a comparabilidade.")
     if external_history is not None and not external_history.empty:
-        st.dataframe(external_history.tail(15), use_container_width=True, hide_index=True)
+        st.dataframe(external_history.tail(15), width="stretch", hide_index=True)
 
 
-def save_import_records(imported: list[dict]) -> int:
-    saved = 0
-    for row in imported:
-        asset_id = db.add_asset(
-            row["ticker"],
-            row.get("nome_ativo", row["ticker"]),
-            row.get("classe_ativo", "Outro"),
-            row.get("categoria_fundo_setor", ""),
-            manual=True,
-            api_code=row.get("codigo_api", ""),
-            currency=row.get("moeda", "BRL"),
-        )
-        db.add_transaction(
-            asset_id,
-            row["tipo_operacao"],
-            row["data_transacao"],
-            float(row["quantidade"]),
-            float(row["preco_unitario"]),
-            float(row.get("taxas_custos", 0.0)),
-            manual=True,
-        )
-        saved += 1
-    return saved
+def save_import_records(imported):
+    return len(db.add_transactions_batch(imported,manual=False))
 
 
-def render_capture(position_frame, assets):
+
+def render_capture(position_frame,assets):
     st.title("Cadastro e importação")
-    tabs = st.tabs(["Transação manual", "Importar CSV/OFX", "Cotação manual", "Provento manual"])
+    tabs=st.tabs(["Transação manual","Importar CSV/OFX","Cotação manual","Provento manual","Renda fixa manual","Câmbio legado"])
     with tabs[0]:
-        st.subheader("Registrar ativo e movimentação")
         with st.form("manual_transaction"):
-            a, b, c = st.columns(3)
-            ticker = a.text_input("Ticker", key="manual_ticker").strip().upper()
-            name = b.text_input("Nome do ativo", key="manual_name")
-            asset_class = c.selectbox("Classe", ASSET_CLASSES, key="manual_class")
-            category = st.text_input("Setor ou categoria do fundo", key="manual_category")
-            api_code = st.text_input("Código no provedor (Yahoo ou ID CoinGecko)", key="manual_api_code")
-            currency = st.selectbox("Moeda de cotação antes da conversão", ["BRL", "USD"], key="manual_currency")
-            d, e, f, g = st.columns(4)
-            operation = d.selectbox("Operação", OPERATIONS)
-            txn_date = e.date_input("Data", value=date.today())
-            quantity = f.number_input("Quantidade", min_value=0.000001, value=1.0, format="%.6f")
-            unit_price = g.number_input("Preço unitário (R$)", min_value=0.0, value=0.0, step=0.1)
-            fees = st.number_input("Taxas e custos (R$)", min_value=0.0, value=0.0, step=0.01)
-            save = st.form_submit_button("Salvar transação", type="primary")
-        if save:
+            a,b,c=st.columns(3); ticker=a.text_input("Ticker").strip().upper(); name=b.text_input("Nome do ativo")
+            cls=c.selectbox("Classe",ASSET_CLASSES); category=st.text_input("Setor/categoria"); api=st.text_input("Código Yahoo/CoinGecko")
+            asset_currency=st.selectbox("Moeda/denominação do ativo",["BRL","USD","USDT","EUR","GBP","BTC","ETH"])
+            tx_currency=st.selectbox("Moeda da transação",["BRL","USD","USDT","EUR","GBP"])
+            op=st.selectbox("Operação",OPERATIONS); d,e,f,g=st.columns(4); day=d.date_input("Data",value=date.today())
+            qty=e.number_input("Quantidade",min_value=.000001,value=1.0,format="%.8f")
+            price=f.number_input("Preço unitário na moeda da transação",min_value=0.0,value=0.0,step=.01)
+            fees=g.number_input("Taxas na moeda da transação",min_value=0.0,value=0.0,step=.01)
+            fx=st.number_input("Câmbio para BRL (0 = usar cache)",min_value=0.0,value=1.0 if tx_currency=="BRL" else 0.0,step=.01)
+            submit=st.form_submit_button("Salvar transação",type="primary")
+        if submit:
             try:
-                if not ticker:
-                    raise ValueError("Informe o ticker.")
-                if asset_class == "Cripto":
-                    currency = "BRL"
-                asset_id = db.add_asset(ticker, name or ticker, asset_class, category, True, api_code, currency)
-                db.add_transaction(asset_id, operation, txn_date.isoformat(), quantity, unit_price, fees, True)
-                st.success("Transação registrada como entrada manual.")
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
+                if not ticker: raise ValueError("Informe ticker.")
+                db.add_transactions_batch([{"ticker":ticker,"nome_ativo":name or ticker,"classe_ativo":cls,"categoria_fundo_setor":category,"codigo_api":api,"moeda_ativo":asset_currency,"moeda_cotacao":"BRL" if cls=="Cripto" else asset_currency,"tipo_operacao":op,"data_transacao":day.isoformat(),"quantidade":qty,"preco_unitario":price,"taxas_custos":fees,"moeda_transacao":tx_currency,"taxa_cambio":fx if fx>0 else None}],manual=True)
+                st.success("Transação gravada e histórico preservado."); st.rerun()
+            except Exception as exc: st.error(str(exc))
     with tabs[1]:
-        st.subheader("Importar histórico de transações")
-        st.write("Envie um CSV no formato do arquivo exemplo ou um OFX de investimentos com ticker, data, quantidade e preço.")
-        template_path = ROOT / "examples" / "exemplo_transacoes.csv"
-        st.download_button(
-            "Baixar modelo CSV",
-            data=template_path.read_bytes(),
-            file_name="modelo_transacoes.csv",
-            mime="text/csv",
-        )
-        uploaded = st.file_uploader("Arquivo CSV ou OFX", type=["csv", "ofx"])
-        if uploaded is not None:
-            digest = hashlib.sha256(uploaded.getvalue()).hexdigest()
+        template=ROOT/"examples"/"exemplo_transacoes.csv"
+        st.write("Preço e custos na moeda da operação; informe câmbio estrangeiro ou use cache.")
+        st.download_button("Baixar modelo CSV",data=template.read_bytes(),file_name="modelo_transacoes.csv",mime="text/csv")
+        upload=st.file_uploader("CSV/OFX",type=["csv","ofx"])
+        if upload:
+            digest=hashlib.sha256(upload.getvalue()).hexdigest()
             try:
-                imported, import_errors = parse_upload(uploaded.name, uploaded.getvalue())
-                st.write(f"Operações válidas encontradas: {len(imported)}")
-                if imported:
-                    st.dataframe(pd.DataFrame(imported).head(30), use_container_width=True, hide_index=True)
-                for error in import_errors[:20]:
-                    st.warning(error)
-                if imported and st.button("Confirmar importação", type="primary", key=f"import_{digest}"):
-                    count = save_import_records(imported)
-                    st.success(f"{count} operação(ões) importada(s).")
-                    st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
-        st.caption("A importação só aceita lançamentos de compra, venda, aporte e retirada. Revise as linhas antes de confirmar.")
+                rows,errors=parse_upload(upload.name,upload.getvalue()); st.write(f"Operações válidas: {len(rows)}")
+                if rows: st.dataframe(pd.DataFrame(rows).head(30),width="stretch",hide_index=True)
+                for error in errors[:20]: st.warning(error)
+                if rows and st.button("Confirmar importação atômica",type="primary",key=f"imp_{digest}"):
+                    n=save_import_records(rows); st.success(f"{n} nova(s) operação(ões); duplicatas ignoradas."); st.rerun()
+            except Exception as exc: st.error(str(exc))
     with tabs[2]:
-        st.subheader("Registrar preço manual")
-        asset_options = {f"{item['ticker']} — {item['nome_ativo']}": item for item in assets}
-        if asset_options:
+        options={f"{x['ticker']}  {x['nome_ativo']}":x for x in assets}
+        if options:
             with st.form("manual_quote"):
-                selected = st.selectbox("Ativo", list(asset_options))
-                quote_date = st.date_input("Data da cotação", value=date.today())
-                price = st.number_input("Preço de fechamento (R$)", min_value=0.0001, value=1.0, step=0.1)
-                save_quote = st.form_submit_button("Salvar cotação")
-            if save_quote:
+                label=st.selectbox("Ativo",list(options)); item=options[label]; curr=str(item.get("moeda","BRL"))
+                day=st.date_input("Data",value=date.today()); price=st.number_input(f"Preço de fechamento ({curr})",min_value=.0001,value=1.0)
+                fx=st.number_input("Câmbio para BRL (0 = cache)",min_value=0.0,value=1.0 if curr=="BRL" else 0.0)
+                submit=st.form_submit_button("Salvar cotação")
+            if submit:
                 try:
-                    db.upsert_quote(int(asset_options[selected]["id_ativo"]), quote_date.isoformat(), price, "Manual", True)
-                    st.success("Cotação salva com origem manual.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-        else:
-            st.info("Cadastre um ativo primeiro.")
+                    if curr!="BRL" and fx<=0:
+                        cached=db.get_exchange_rate(curr,day.isoformat())
+                        if not cached: raise ValueError(f"Informe taxa {curr}/BRL ou registre cache.")
+                        fx=float(cached["taxa_para_brl"])
+                    db.upsert_quote(int(item["id_ativo"]),day.isoformat(),price,"Manual",True,curr,fx)
+                    st.success("Cotação manual convertida para BRL."); st.rerun()
+                except Exception as exc: st.error(str(exc))
+        else: st.info("Cadastre um ativo primeiro.")
     with tabs[3]:
-        st.subheader("Registrar dividendo, JCP ou rendimento")
-        asset_options = {f"{item['ticker']} — {item['nome_ativo']}": item for item in assets}
-        if asset_options:
+        options={f"{x['ticker']}  {x['nome_ativo']}":x for x in assets}
+        if options:
             with st.form("manual_dividend"):
-                selected_dividend = st.selectbox("Ativo", list(asset_options), key="dividend_asset")
-                kind = st.selectbox("Tipo", ["Dividendo", "JCP", "Rendimento"])
-                ex_date = st.date_input("Data com", value=date.today())
-                payment_date = st.date_input("Data de pagamento", value=date.today())
-                per_unit = st.number_input("Valor por unidade (R$)", min_value=0.0, value=0.0, step=0.01)
-                total = st.number_input("Valor total recebido (R$)", min_value=0.0, value=0.0, step=0.01)
-                save_dividend = st.form_submit_button("Salvar provento")
-            if save_dividend:
-                try:
-                    db.add_dividend(int(asset_options[selected_dividend]["id_ativo"]), kind, ex_date.isoformat(), payment_date.isoformat(), per_unit, total, True)
-                    st.success("Provento registrado.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-        else:
-            st.info("Cadastre um ativo primeiro.")
+                label=st.selectbox("Ativo",list(options),key="div_asset"); kind=st.selectbox("Tipo",["Dividendo","JCP","Rendimento"])
+                ex=st.date_input("Data com",value=date.today()); pay=st.date_input("Pagamento",value=date.today())
+                per=st.number_input("Valor por unidade (BRL)",min_value=0.0,value=0.0); total=st.number_input("Total (BRL)",min_value=0.0,value=0.0)
+                submit=st.form_submit_button("Salvar provento")
+            if submit:
+                try: db.add_dividend(int(options[label]["id_ativo"]),kind,ex.isoformat(),pay.isoformat(),per,total); st.success("Provento salvo em BRL."); st.rerun()
+                except Exception as exc: st.error(str(exc))
+        else: st.info("Cadastre um ativo primeiro.")
+    with tabs[4]:
+        fixed=records(db.list_fixed_income()); choices={"Novo investimento":None}
+        choices.update({f"{x['nome']}  {x['tipo']}  ID {x['id_renda_fixa']}":x for x in fixed})
+        label=st.selectbox("Criar/editar",list(choices),key="fixed_choice"); old=choices[label]
+        with st.form("fixed_form"):
+            name=st.text_input("Nome",value=old["nome"] if old else ""); kinds=["CDB","LCI/LCA","Tesouro","Outro"]
+            kind=st.selectbox("Tipo",kinds,index=kinds.index(old["tipo"]) if old else 0)
+            issuer=st.text_input("Emissor",value=old["emissor"] if old else ""); bank=st.text_input("Instituição",value=old["instituicao"] if old else "")
+            invested=st.number_input("Valor investido BRL",min_value=0.0,value=float(old["valor_investido"]) if old else 0.0)
+            updated=st.number_input("Valor atualizado manual BRL",min_value=0.0,value=float(old["valor_atualizado"]) if old else 0.0)
+            rate=st.text_input("Taxa",value=old["taxa"] if old else ""); indexer=st.text_input("Indexador",value=old["indexador"] if old else "")
+            maturity=st.text_input("Vencimento AAAA-MM-DD",value=old["vencimento"] if old else "")
+            liquidity=st.text_input("Liquidez",value=old["liquidez"] if old else ""); notes=st.text_area("Observações",value=old["observacoes"] if old else "")
+            submit=st.form_submit_button("Salvar renda fixa",type="primary")
+        if submit:
+            try:
+                db.save_fixed_income({"nome":name,"tipo":kind,"emissor":issuer,"instituicao":bank,"valor_investido":invested,"valor_atualizado":updated,"taxa":rate,"indexador":indexer,"vencimento":maturity,"liquidez":liquidity,"observacoes":notes},int(old["id_renda_fixa"]) if old else None)
+                st.success("Renda fixa manual salva em BRL."); st.rerun()
+            except Exception as exc: st.error(str(exc))
 
+    with tabs[5]:
+        st.subheader("Regularizar câmbio das operações antigas")
+        pending=db.list_unconverted_transactions()
+        if pending:
+            st.warning("Operações estrangeiras migradas sem câmbio histórico ficam fora dos resultados até informar uma taxa confiável.")
+            st.dataframe(pd.DataFrame([{"ID":r["id_transacao"],"Ticker":r["ticker"],"Data":r["data_transacao"],"Moeda":r["moeda_transacao"],"Valor original":r["valor_total_original"],"Origem":r["fonte_cambio"]} for r in pending]),width="stretch",hide_index=True)
+            with st.form("legacy_fx"):
+                labels={f"#{r['id_transacao']} {r['ticker']}  {r['data_transacao']}  {r['moeda_transacao']}":r for r in pending}
+                label=st.selectbox("Operação",list(labels))
+                rate=st.number_input(f"Taxa {labels[label]['moeda_transacao']}/BRL",min_value=0.0,value=0.0,step=.01)
+                submit=st.form_submit_button("Aplicar taxa manual")
+            if submit:
+                try:
+                    if rate<=0: raise ValueError("Informe uma taxa positiva.")
+                    db.set_transaction_exchange_rate(labels[label]["id_transacao"],rate)
+                    st.success("Taxa aplicada à operação."); st.rerun()
+                except Exception as exc: st.error(str(exc))
+        else:
+            st.info("Não há operações antigas aguardando câmbio.")
 
 def render_settings():
-    st.title("Configurações e backup")
-    current = settings()
-    st.write("Personalize referências de análise. Esses parâmetros não bloqueiam a alocação nem representam promessa de retorno.")
+    st.title("Configurações e backup"); current=settings()
     with st.form("settings_form"):
-        a, b, c = st.columns(3)
-        target1 = a.number_input("Meta de referência 1 (% ao mês)", min_value=-50.0, max_value=100.0, value=float(current["meta_mensal_1"]) * 100, step=0.1)
-        target2 = b.number_input("Meta de referência 2 (% ao mês)", min_value=-50.0, max_value=100.0, value=float(current["meta_mensal_2"]) * 100, step=0.1)
-        rf = c.number_input("Selic/CDI anual acumulada (%)", min_value=-50.0, max_value=100.0, value=float(current["risk_free_annual"] or 0), step=0.1)
-        d, e = st.columns(2)
-        fixed_income = d.number_input("Referência de renda fixa (% da carteira)", min_value=0.0, max_value=100.0, value=float(current["fixed_income_reference"]) * 100, step=1.0)
-        concentration = e.number_input("Alerta de concentração (%)", min_value=1.0, max_value=100.0, value=float(current["concentration_limit_pct"]), step=1.0)
-        save = st.form_submit_button("Salvar preferências", type="primary")
+        a,b,c=st.columns(3); x=a.number_input("Meta mensal 1 (%)",min_value=-50.0,max_value=100.0,value=float(current["meta_mensal_1"])*100)
+        y=b.number_input("Meta mensal 2 (%)",min_value=-50.0,max_value=100.0,value=float(current["meta_mensal_2"])*100)
+        rf=c.number_input("Selic/CDI anual (%)",min_value=-50.0,max_value=100.0,value=float(current["risk_free_annual"] or 0))
+        d,e=st.columns(2); fixed=d.number_input("Referência renda fixa (%)",min_value=0.0,max_value=100.0,value=float(current["fixed_income_reference"])*100)
+        concentration=e.number_input("Alerta concentração (%)",min_value=1.0,max_value=100.0,value=float(current["concentration_limit_pct"]))
+        save=st.form_submit_button("Salvar preferências")
     if save:
-        db.set_setting("meta_mensal_1", str(target1 / 100))
-        db.set_setting("meta_mensal_2", str(target2 / 100))
-        db.set_setting("risk_free_annual", str(rf))
-        db.set_setting("fixed_income_reference", str(fixed_income / 100))
-        db.set_setting("concentration_limit_pct", str(concentration))
-        st.success("Preferências salvas no banco local.")
-        st.rerun()
-    st.divider()
-    st.subheader("Backup local")
-    st.write("Uma cópia de segurança é criada ao iniciar a plataforma. Baixe uma cópia adicional antes de fazer alterações importantes.")
-    if db.DB_PATH.exists():
-        st.download_button("Baixar banco SQLite", data=db.DB_PATH.read_bytes(), file_name="investimentos-backup.db", mime="application/x-sqlite3")
-    backups = sorted(db.BACKUP_DIR.glob("investimentos-*.db"), reverse=True) if db.BACKUP_DIR.exists() else []
-    if backups:
-        st.caption("Cópias automáticas locais (até 14):")
-        st.dataframe(pd.DataFrame([{"Arquivo": p.name, "Tamanho (KB)": round(p.stat().st_size / 1024, 1)} for p in backups]), use_container_width=True, hide_index=True)
-    restore_file = st.file_uploader("Restaurar banco SQLite de um arquivo de backup", type=["db", "sqlite", "sqlite3"])
-    if restore_file is not None and st.button("Validar e restaurar backup", type="secondary"):
-        try:
-            db.restore_database(restore_file.getvalue())
-            st.success("Backup restaurado. Atualize a página.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Não foi possível restaurar o arquivo: {exc}")
-    st.caption("A Fase 1 mantém o arquivo no computador local. A autenticação e o serviço em nuvem descritos como Fase 2 não fazem parte desta entrega.")
+        for key,value in (("meta_mensal_1",x/100),("meta_mensal_2",y/100),("risk_free_annual",rf),("fixed_income_reference",fixed/100),("concentration_limit_pct",concentration)): db.set_setting(key,str(value))
+        st.success("Preferências salvas."); st.rerun()
+    st.divider(); st.subheader("Backup local"); st.write(f"Schema SQLite {db.SCHEMA_VERSION}; download usa snapshot consistente.")
+    st.download_button("Baixar backup SQLite",data=db.backup_database_bytes(),file_name="investimentos-backup.db",mime="application/x-sqlite3")
+    backups=sorted(db.BACKUP_DIR.glob("investimentos-*.db"),reverse=True) if db.BACKUP_DIR.exists() else []
+    if backups: st.dataframe(pd.DataFrame([{"Arquivo":p.name,"KB":round(p.stat().st_size/1024,1)} for p in backups]),width="stretch",hide_index=True)
+    upload=st.file_uploader("Restaurar banco SQLite",type=["db","sqlite","sqlite3"])
+    if upload is not None and st.button("Validar e restaurar"):
+        try: db.restore_database(upload.getvalue()); st.success("Backup restaurado."); st.rerun()
+        except Exception as exc: st.error(f"Falha na restauração: {exc}")
+    st.caption("Histórico com pesos atuais é estimativa, não rentabilidade real reconstruída.")
+
 
 
 def main():
@@ -735,7 +715,18 @@ def main():
         st.error(f"Não foi possível abrir o banco local: {exc}")
         st.stop()
     page = render_sidebar()
-    position_frame, assets, transactions, quote_frame = load_portfolio()
+    pending_fx=records(db.list_unconverted_transactions())
+    if pending_fx and page!="Cadastro e importação":
+        st.error(f"Há {len(pending_fx)} operação(ões) estrangeira(s) antiga(s) sem taxa histórica; nenhum resultado será calculado para evitar valores incorretos.")
+        st.info("Abra Cadastro e importação / Câmbio legado e informe uma taxa de fonte confiável para cada operação.")
+        st.stop()
+    if pending_fx:
+        position_frame=pd.DataFrame()
+        assets=records(db.list_assets())
+        transactions=records(db.list_transactions())
+        quote_frame=pd.DataFrame(records(db.list_quotes()))
+    else:
+        position_frame, assets, transactions, quote_frame = load_portfolio()
     dividends = records(db.list_dividends())
     config = settings()
     if page == "Visão geral":

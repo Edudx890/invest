@@ -38,14 +38,13 @@ O retorno é anualizado a partir do produto de retornos observados. A taxa Selic
 
 Na simulação, o app usa Ibovespa (^BVSP) como referência padrão para ativos brasileiros, S&P 500 (^GSPC) quando é informado um símbolo Yahoo estrangeiro e Bitcoin (BTC-USD) para cripto. Se um benchmark falhar ou houver menos de 20 retornos pareados, beta e CAPM ficam indisponíveis.
 
-## 6. Preço médio e posição
+## 6. Custo médio, posição e resultados
 
-Compra e Aporte adicionam unidades e custos. Venda e Retirada removem unidades ao custo médio móvel; taxas de compras entram no custo. A posição visível é:
+O custo médio ponderado móvel é calculado em BRL. Compra/Aporte soma unidades, total convertido e taxas ao custo. Venda remove o custo médio das unidades vendidas; o resultado realizado é receita líquida em BRL menos a base removida. Taxas de compra somam à base; taxas de venda reduzem receita. Venda acima da posição é recusada. Retirada reduz unidades sem inventar receita.
 
-    valor_mercado = quantidade_atual * cotacao_mais_recente
-    resultado_nao_realizado = valor_mercado - custo_residual
+Patrimônio atual é quantidade aberta vezes cotação atual em BRL. Resultado não realizado = patrimônio menos custo residual. Realizado, não realizado, proventos e taxas são valores separados. Sem cotação, o custo médio é uma referência provisória identificada.
 
-O sistema limita uma venda ao saldo positivo disponível e não cria uma posição vendida. O resultado realizado em cada venda não é mostrado como métrica de lucro/prejuízo fiscal.
+Resultado total soma realizado + não realizado + proventos. Percentual sobre aquisições acumuladas é indicativo; não é TWR/XIRR nem cálculo tributário.
 
 ## 7. Eventos corporativos e proventos
 
@@ -66,47 +65,40 @@ O cenário determinístico aplica capitalização mensal, taxa informada e aport
 
 O aporte hipotético modifica os pesos pelo valor atual da carteira e do aporte. Retorno, EWMA e Sharpe comparam séries disponíveis. Se a API falhar e forem usadas premissas manuais, a série do ativo é sintética e reprodutível; os resultados devem ser interpretados como exemplo de cenário.
 
-## 11. Banco SQLite
+## 11. Banco SQLite  schema 3
 
-O banco data/investimentos.db usa tabelas normalizadas:
+A moeda-base de carteira é BRL.
 
 ### Ativos
-
-- id_ativo: chave primária.
-- ticker: código único.
-- nome_ativo, classe_ativo, categoria_fundo_setor.
-- is_manual_entry: identifica o cadastro manual.
-- codigo_api: ticker específico do provedor ou ID do CoinGecko.
-- moeda: moeda-base da série Yahoo (BRL ou USD); preços em USD são convertidos para BRL.
-- data_cadastro.
+- moeda_ativo: denominação/listagem informada para o ativo.
+- moeda: moeda de cotação do provedor, mantida para compatibilidade.
+- moeda_base: BRL.
+- ticker, classe, categoria, origem e código do provedor.
 
 ### Transacoes
-
-- id_transacao: chave primária.
-- id_ativo: chave estrangeira para Ativos.
-- tipo_operacao, data_transacao, quantidade, preco_unitario, taxas_custos.
-- is_manual_entry: identifica origem manual/importada.
+- moeda_transacao, preco_unitario_original, valor_total_original e taxas_custos_original.
+- taxa_cambio: BRL por unidade da moeda da transação; fonte_cambio identifica manual/cache/identidade/legado.
+- moeda_base, preco_unitario_brl, valor_total_brl e taxas_custos_brl.
+- Quantidade original canônica, preço original, data, operação, origem e fingerprint de importação; valores decimais ficam como texto canônico.
+- Os campos REAL antigos permanecem para leitura por versões legadas. O cálculo usa campos decimais textuais.
 
 ### Cotacoes_Historico
+- preco_fechamento sempre convertido para BRL, com moeda_base.
+- preco_original, moeda_original e taxa_cambio preservam a observação de origem.
+- preco_ajustado fica separado do fechamento para indicadores de retorno.
+- fonte_dados/is_manual_entry preservam proveniência e a chave única por ativo/data torna atualização idempotente.
 
-- id_cotacao: chave primária.
-- id_ativo: chave estrangeira para Ativos.
-- data_cotacao, preco_fechamento, fonte_dados, is_manual_entry.
-- Restrição única por id_ativo e data_cotacao para atualização idempotente da cotação diária.
+### Proventos e câmbio
+- Proventos preserva total em BRL, moeda, taxa e fonte.
+- Taxas_Cambio guarda moeda, data, taxa_para_brl e fonte, chave única por moeda/data. Cache usa data exata ou taxa anterior até sete dias.
 
-### Proventos
+### Renda fixa e versão
+- Renda_Fixa guarda cadastro manual em BRL: investido, atualizado, taxa, indexador, vencimento, liquidez, emissor/instituição e observações.
+- Schema_Meta e PRAGMA user_version registram a versão 3.
+- A inicialização aplica migração aditiva e faz backup da base existente antes de alterar o schema. Operações/importações são transacionais.
+- Backups usam a API SQLite consistente; restauração verifica integridade, tabelas, versão e chaves estrangeiras antes da substituição.
 
-- id_provento: chave primária.
-- id_ativo: chave estrangeira para Ativos.
-- tipo_provento (Dividendo, JCP, Rendimento ou Split).
-- data_com, data_pagamento, valor_por_acao, valor_total, is_manual_entry.
-
-### Configuracoes
-
-- chave: chave primária.
-- valor, atualizado_em.
-
-Índices são criados nas chaves estrangeiras e datas usadas nas consultas. Na inicialização, o app cria um backup e conserva as 14 versões mais recentes.
+Na migração, a moeda antiga do ativo é usada para identificar a moeda original da transação. Se houver taxa histórica no cache, os valores são convertidos; se faltar, o original estrangeiro é preservado e a operação fica pendente, fora dos resultados até regularização manual. O banco existente é preservado por migração aditiva e recebe backup antes da inicialização.
 
 ## 12. Dados e fontes
 
@@ -114,3 +106,6 @@ O banco data/investimentos.db usa tabelas normalizadas:
 - CoinGecko: https://docs.coingecko.com/reference/coins-id-market-chart
 - Banco Central do Brasil, descrição da série Selic efetiva: https://dadosabertos.bcb.gov.br/pt_BR/dataset/11-taxa-de-juros---selic
 
+
+
+A descrição de schema e cálculos acima substitui os campos legados descritos nas versões anteriores deste documento.

@@ -26,10 +26,13 @@ O app é executado no próprio computador e vinculado a 127.0.0.1. SQLite é a f
 | Arquivo | Responsabilidade |
 |---|---|
 | app.py | Interface Streamlit, navegação, captura de dados e visualizações. |
-| src/portfolio_app/db.py | Schema SQLite, consultas, gravação, backups e restauração. |
+| src/portfolio_app/db.py | Schema SQLite 3, migrações, câmbio, transações atômicas, backups e restauração. |
+| src/portfolio_app/financial.py | Validação decimal, moedas e valores originais/convertidos. |
 | src/portfolio_app/calculations.py | Posições, custo médio, retornos, EWMA, Sharpe, beta, CAPM, concentração e projeção. |
 | src/portfolio_app/market_data.py | Consulta yfinance e CoinGecko, normalização de símbolos e preços. |
 | src/portfolio_app/importers.py | Leitura e validação de CSV e operações OFX simples. |
+| tests/ | Testes automatizados de cálculos, importação, banco, interface e provedores simulados. |
+| scripts/package_windows.py | Montagem e validação do ZIP completo para Windows. |
 | requirements.txt | Dependências Python da aplicação. |
 | setup_windows.bat / setup_unix.sh | Criação do ambiente local e instalação de pacotes. |
 | run_windows.bat / run_unix.sh | Inicialização local em 127.0.0.1. |
@@ -37,6 +40,8 @@ O app é executado no próprio computador e vinculado a 127.0.0.1. SQLite é a f
 | docs/GUIA_DE_USO.md | Instalação, uso, importação e resolução de problemas. |
 | docs/METODOS_E_MODELO_DE_DADOS.md | Equações, convenções e esquema do banco. |
 | docs/DECISOES_E_LIMITACOES.md | Premissas, fronteiras das integrações, segurança e limitações. |
+| docs/METODOLOGIA_FINANCEIRA.md / docs/TESTES.md | Metodologia do ledger e instruções/cobertura de testes. |
+| CHANGELOG.md | Alterações da versão de homologação. |
 
 ## 4. Fluxos de dados
 
@@ -71,7 +76,7 @@ O app é executado no próprio computador e vinculado a 127.0.0.1. SQLite é a f
 | RLN-001: retorno, EWMA, Sharpe | Funções em calculations.py e exibição no Estado atual/simulação | Implementado; rf manual |
 | RLN-001: CAPM e beta | Beta e retorno CAPM na simulação, usando benchmarks indicados no código | Implementado quando há histórico pareado |
 | RLN-001: splits e proventos | Histórico Yahoo registra dividendos/splits; eventos manuais e eventos obtidos mantêm origem | Implementado quando o provedor informa |
-| RLN-003: metas e renda fixa | Preferências ajustáveis sem bloquear alocação | Implementado |
+| RLN-003: metas e renda fixa | Preferências ajustáveis e cadastro manual detalhado em BRL | Implementado manualmente |
 | RLN-004: fallback | Entrada manual, CSV/OFX e cotação local | Implementado |
 | RLN-005: concentração | Alertas de classe e categoria acima do limite configurável | Implementado |
 | RNF-001: consulta até 2 s / 10 mil transações | Índices e cache de 15 min reduzem carga; desempenho depende do hardware e do número de cotações externas | Não homologado; não há benchmark nesta entrega |
@@ -105,3 +110,8 @@ O app é executado no próprio computador e vinculado a 127.0.0.1. SQLite é a f
 ## 8. Critérios operacionais para evoluir
 
 Antes de conectar serviço de custódia, validar credenciais, consentimento, limites, formatos e mecanismo de revogação. Antes de usar métricas para decisão, conferir cotação, moeda, quantidade, origem, período e taxa livre de risco. Cada mudança de escopo deve atualizar a matriz, o schema e este mapa.
+
+
+## Confiabilidade
+
+Ledger decimal com custo médio, bloqueio de venda excedente, importação atômica, schema versionado e migração aditiva. Renda fixa manual. Cotações fechadas e séries ajustadas separadas. Histórico da carteira continua uma estimativa. Testes em tests/.
